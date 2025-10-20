@@ -1,2 +1,2 @@
 # snaptask-frontend
-frontent of the snaptask website
+frontend of the snaptask website
