@@ -487,11 +487,14 @@ Be friendly, encouraging, and concise. Use emojis occasionally to be engaging.`
             })
           });
 
+          const data = await response.json();
+
           if (!response.ok) {
-            throw new Error(`API Error: ${response.status}`);
+            // Show specific error from API
+            const errorMsg = data.error?.message || `HTTP ${response.status}: ${response.statusText}`;
+            throw new Error(errorMsg);
           }
 
-          const data = await response.json();
           const aiResponse = data.choices[0].message.content;
 
           // Remove "thinking" message and add real response
@@ -502,10 +505,13 @@ Be friendly, encouraging, and concise. Use emojis occasionally to be engaging.`
 
         } catch (error) {
           console.error('Chat AI Error:', error);
-          // Remove "thinking" message and add fallback response
+          // Remove "thinking" message and add detailed error
           setChatMessages(prev => {
             const filtered = prev.filter(msg => msg.text !== '💭 Thinking...');
-            return [...filtered, { type: 'bot', text: `⚠️ AI temporarily unavailable. ${getAIResponse(userMessage)}` }];
+            return [...filtered, { 
+              type: 'bot', 
+              text: `⚠️ Error: ${error.message}\n\nTroubleshooting:\n• Check your API key is correct\n• Make sure key starts with "gsk_"\n• Try creating a new key at console.groq.com\n\nUsing demo mode for now...` 
+            }];
           });
         }
       } else {
@@ -922,7 +928,18 @@ Be friendly, encouraging, and concise. Use emojis occasionally to be engaging.`
 
         {activeTab === 'chat' && (
           <div className="bg-white rounded-lg shadow-md p-6">
-            <h2 className="text-2xl font-bold text-gray-800 mb-4">💬 AI Assistant Chat</h2>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-2xl font-bold text-gray-800">💬 AI Assistant Chat</h2>
+              {groqApiKey ? (
+                <span className="text-sm bg-green-100 text-green-800 px-3 py-1 rounded-full font-semibold">
+                  🤖 Real AI Active
+                </span>
+              ) : (
+                <span className="text-sm bg-gray-100 text-gray-600 px-3 py-1 rounded-full">
+                  🎭 Demo Mode
+                </span>
+              )}
+            </div>
             <div className="border rounded-lg h-96 overflow-y-auto p-4 mb-4 bg-gray-50">
               {chatMessages.map((msg, idx) => (
                 <div
@@ -957,6 +974,11 @@ Be friendly, encouraging, and concise. Use emojis occasionally to be engaging.`
                 Send
               </button>
             </div>
+            {!groqApiKey && (
+              <p className="text-sm text-gray-500 mt-2 text-center">
+                💡 Tip: Add your Groq API key in Settings for real AI responses!
+              </p>
+            )}
           </div>
         )}
 
