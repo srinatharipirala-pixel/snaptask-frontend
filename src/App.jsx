@@ -54,8 +54,13 @@ export default function SnapTaskWebsite() {
     const file = event.target.files[0];
     if (!file) return;
 
-    if (!file.type.startsWith('audio/')) {
-      alert('Please select an audio file from your SnapTask Pin device.');
+    // Check file extension
+    const fileName = file.name.toLowerCase();
+    const validExtensions = ['.flac', '.mp3', '.mp4', '.mpeg', '.mpga', '.m4a', '.ogg', '.opus', '.wav', '.webm'];
+    const hasValidExtension = validExtensions.some(ext => fileName.endsWith(ext));
+    
+    if (!hasValidExtension) {
+      alert('Please select an audio file. Supported formats: FLAC, MP3, MP4, MPEG, MPGA, M4A, OGG, OPUS, WAV, WEBM');
       return;
     }
 
@@ -80,12 +85,26 @@ export default function SnapTaskWebsite() {
         });
       }, 200);
 
-      // Step 2: Transcribe audio using Groq Whisper
+      // Step 2: Try to re-encode the audio if it's problematic
+      let audioToUpload = file;
+      
+      // If it's a WAV file, try to validate and potentially re-encode it
+      if (fileName.endsWith('.wav')) {
+        try {
+          audioToUpload = await validateAndFixWavFile(file);
+        } catch (reencodeError) {
+          console.warn('Could not re-encode WAV, trying original file:', reencodeError);
+          // Continue with original file
+        }
+      }
+
+      // Step 3: Transcribe audio using Groq Whisper
       const formData = new FormData();
-      formData.append('file', file);
+      formData.append('file', audioToUpload, audioToUpload.name);
       formData.append('model', 'whisper-large-v3');
       formData.append('response_format', 'json');
       formData.append('language', 'en');
+      formData.append('temperature', '0');
 
       const transcriptionResponse = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
         method: 'POST',
@@ -125,10 +144,120 @@ export default function SnapTaskWebsite() {
 
     } catch (error) {
       console.error('Error processing audio file:', error);
-      alert(`❌ Error: ${error.message}\n\nTroubleshooting:\n• Make sure your Groq API key is correct\n• Check that the audio file is clear\n• Try recording again if speech wasn't detected`);
+      alert(`❌ Error: ${error.message}\n\nTroubleshooting:\n• Your WAV file may have an unsupported codec\n• Try converting it to MP3 format first\n• Make sure the audio is clear\n• Check that your Groq API key is correct`);
       setIsSyncing(false);
       setIsProcessingFile(false);
       setSyncProgress(0);
+    }
+  };
+
+  // Function to validate and re-encode WAV files
+  const validateAndFixWavFile = async (file) => {
+    return new Promise((resolve, reject) => {
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const fileReader = new FileReader();
+
+      fileReader.onload = async (e) => {
+        try {
+          const arrayBuffer = e.target.result;
+          
+          // Try to decode the audio
+          const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+          
+          // Re-encode to a standard WAV format
+          const numberOfChannels = Math.min(audioBuffer.numberOfChannels, 2); // Max 2 channels
+          const sampleRate = 16000; // Standard rate for speech recognition
+          const length = audioBuffer.length * (sampleRate / audioBuffer.sampleRate);
+          
+          const offlineContext = new OfflineAudioContext(numberOfChannels, length, sampleRate);
+          const source = offlineContext.createBufferSource();
+          source.buffer = audioBuffer;
+          source.connect(offlineContext.destination);
+          source.start(0);
+          
+          const renderedBuffer = await offlineContext.startRendering();
+          
+          // Convert to WAV blob
+          const wavBlob = audioBufferToWav(renderedBuffer);
+          const newFile = new File([wavBlob], file.name, { type: 'audio/wav' });
+          
+          resolve(newFile);
+        } catch (error) {
+          reject(error);
+        }
+      };
+
+      fileReader.onerror = () => reject(new Error('Failed to read audio file'));
+      fileReader.readAsArrayBuffer(file);
+    });
+  };
+
+  // Convert AudioBuffer to WAV format
+  const audioBufferToWav = (buffer) => {
+    const numberOfChannels = buffer.numberOfChannels;
+    const sampleRate = buffer.sampleRate;
+    const format = 1; // PCM
+    const bitDepth = 16;
+    
+    const bytesPerSample = bitDepth / 8;
+    const blockAlign = numberOfChannels * bytesPerSample;
+    
+    const data = [];
+    for (let i = 0; i < buffer.numberOfChannels; i++) {
+      data.push(buffer.getChannelData(i));
+    }
+    
+    const interleaved = interleave(data);
+    const dataLength = interleaved.length * bytesPerSample;
+    const headerLength = 44;
+    const totalLength = headerLength + dataLength;
+    
+    const arrayBuffer = new ArrayBuffer(totalLength);
+    const view = new DataView(arrayBuffer);
+    
+    // WAV header
+    writeString(view, 0, 'RIFF');
+    view.setUint32(4, totalLength - 8, true);
+    writeString(view, 8, 'WAVE');
+    writeString(view, 12, 'fmt ');
+    view.setUint32(16, 16, true); // fmt chunk size
+    view.setUint16(20, format, true);
+    view.setUint16(22, numberOfChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * blockAlign, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitDepth, true);
+    writeString(view, 36, 'data');
+    view.setUint32(40, dataLength, true);
+    
+    // Write audio data
+    let offset = 44;
+    for (let i = 0; i < interleaved.length; i++) {
+      const sample = Math.max(-1, Math.min(1, interleaved[i]));
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+      offset += 2;
+    }
+    
+    return new Blob([arrayBuffer], { type: 'audio/wav' });
+  };
+
+  const interleave = (channelData) => {
+    const length = channelData[0].length;
+    const numberOfChannels = channelData.length;
+    const result = new Float32Array(length * numberOfChannels);
+    
+    for (let i = 0; i < length; i++) {
+      for (let channel = 0; channel < numberOfChannels; channel++) {
+        result[i * numberOfChannels + channel] = channelData[channel][i];
+      }
+    }
+    
+    return result;
+  };
+
+  const writeString = (view, offset, string) => {
+    for (let i = 0; i < string.length; i++) {
+      view.setUint8(offset + i, string.charCodeAt(i));
     }
   };
 
