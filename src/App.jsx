@@ -74,33 +74,40 @@ export default function SnapTaskWebsite() {
     setSyncProgress(0);
 
     try {
-      // Step 1: Upload progress simulation
+      // Step 1: Convert to MP3 if it's a WAV file
       const uploadInterval = setInterval(() => {
         setSyncProgress(prev => {
-          if (prev >= 50) {
+          if (prev >= 40) {
             clearInterval(uploadInterval);
-            return 50;
+            return 40;
           }
-          return prev + 10;
+          return prev + 8;
         });
       }, 200);
 
-      // Step 2: Try to re-encode the audio if it's problematic
       let audioToUpload = file;
+      let uploadFileName = file.name;
       
-      // If it's a WAV file, try to validate and potentially re-encode it
       if (fileName.endsWith('.wav')) {
         try {
-          audioToUpload = await validateAndFixWavFile(file);
-        } catch (reencodeError) {
-          console.warn('Could not re-encode WAV, trying original file:', reencodeError);
-          // Continue with original file
+          console.log('Converting WAV to MP3...');
+          const mp3Blob = await convertWavToMp3(file);
+          audioToUpload = new File([mp3Blob], file.name.replace('.wav', '.mp3'), { type: 'audio/mpeg' });
+          uploadFileName = audioToUpload.name;
+          console.log('Conversion successful!');
+        } catch (conversionError) {
+          console.error('MP3 conversion failed:', conversionError);
+          // Try original file as fallback
+          console.log('Using original WAV file...');
         }
       }
 
-      // Step 3: Transcribe audio using Groq Whisper
+      clearInterval(uploadInterval);
+      setSyncProgress(50);
+
+      // Step 2: Transcribe audio using Groq Whisper
       const formData = new FormData();
-      formData.append('file', audioToUpload, audioToUpload.name);
+      formData.append('file', audioToUpload, uploadFileName);
       formData.append('model', 'whisper-large-v3');
       formData.append('response_format', 'json');
       formData.append('language', 'en');
@@ -114,7 +121,6 @@ export default function SnapTaskWebsite() {
         body: formData
       });
 
-      clearInterval(uploadInterval);
       setSyncProgress(75);
 
       if (!transcriptionResponse.ok) {
@@ -126,7 +132,7 @@ export default function SnapTaskWebsite() {
       const transcript = transcriptionData.text;
 
       if (!transcript || transcript.trim().length === 0) {
-        throw new Error('No speech detected in the audio file. Please try recording again.');
+        throw new Error('No speech detected in the audio file. Please try recording again with clearer audio.');
       }
 
       setSyncProgress(100);
@@ -144,122 +150,116 @@ export default function SnapTaskWebsite() {
 
     } catch (error) {
       console.error('Error processing audio file:', error);
-      alert(`❌ Error: ${error.message}\n\nTroubleshooting:\n• Your WAV file may have an unsupported codec\n• Try converting it to MP3 format first\n• Make sure the audio is clear\n• Check that your Groq API key is correct`);
+      alert(`❌ Error: ${error.message}\n\nPlease try:\n• Recording again with clearer audio\n• Checking your internet connection\n• Verifying your Groq API key`);
       setIsSyncing(false);
       setIsProcessingFile(false);
       setSyncProgress(0);
     }
   };
 
-  // Function to validate and re-encode WAV files
-  const validateAndFixWavFile = async (file) => {
-    return new Promise((resolve, reject) => {
-      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      const fileReader = new FileReader();
+  // Convert WAV to MP3 using Web Audio API and lamejs
+  const convertWavToMp3 = async (wavFile) => {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const fileReader = new FileReader();
 
-      fileReader.onload = async (e) => {
-        try {
-          const arrayBuffer = e.target.result;
-          
-          // Try to decode the audio
-          const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-          
-          // Re-encode to a standard WAV format
-          const numberOfChannels = Math.min(audioBuffer.numberOfChannels, 2); // Max 2 channels
-          const sampleRate = 16000; // Standard rate for speech recognition
-          const length = audioBuffer.length * (sampleRate / audioBuffer.sampleRate);
-          
-          const offlineContext = new OfflineAudioContext(numberOfChannels, length, sampleRate);
-          const source = offlineContext.createBufferSource();
-          source.buffer = audioBuffer;
-          source.connect(offlineContext.destination);
-          source.start(0);
-          
-          const renderedBuffer = await offlineContext.startRendering();
-          
-          // Convert to WAV blob
-          const wavBlob = audioBufferToWav(renderedBuffer);
-          const newFile = new File([wavBlob], file.name, { type: 'audio/wav' });
-          
-          resolve(newFile);
-        } catch (error) {
-          reject(error);
-        }
-      };
+        fileReader.onload = async (e) => {
+          try {
+            const arrayBuffer = e.target.result;
+            const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+            
+            // Convert to mono and resample to 44100 Hz for better compatibility
+            const sampleRate = 44100;
+            const numberOfChannels = 1; // Mono
+            const length = audioBuffer.duration * sampleRate;
+            
+            const offlineContext = new OfflineAudioContext(numberOfChannels, length, sampleRate);
+            const source = offlineContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(offlineContext.destination);
+            source.start(0);
+            
+            const renderedBuffer = await offlineContext.startRendering();
+            
+            // Get audio samples
+            const samples = renderedBuffer.getChannelData(0);
+            
+            // Convert float samples to 16-bit PCM
+            const pcmSamples = new Int16Array(samples.length);
+            for (let i = 0; i < samples.length; i++) {
+              const s = Math.max(-1, Math.min(1, samples[i]));
+              pcmSamples[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            }
+            
+            // Encode to MP3 using lamejs (inline implementation)
+            const mp3Data = encodeToMp3(pcmSamples, sampleRate);
+            const mp3Blob = new Blob(mp3Data, { type: 'audio/mpeg' });
+            
+            resolve(mp3Blob);
+          } catch (error) {
+            reject(error);
+          }
+        };
 
-      fileReader.onerror = () => reject(new Error('Failed to read audio file'));
-      fileReader.readAsArrayBuffer(file);
+        fileReader.onerror = () => reject(new Error('Failed to read audio file'));
+        fileReader.readAsArrayBuffer(wavFile);
+      } catch (error) {
+        reject(error);
+      }
     });
   };
 
-  // Convert AudioBuffer to WAV format
-  const audioBufferToWav = (buffer) => {
-    const numberOfChannels = buffer.numberOfChannels;
-    const sampleRate = buffer.sampleRate;
-    const format = 1; // PCM
-    const bitDepth = 16;
-    
-    const bytesPerSample = bitDepth / 8;
-    const blockAlign = numberOfChannels * bytesPerSample;
-    
-    const data = [];
-    for (let i = 0; i < buffer.numberOfChannels; i++) {
-      data.push(buffer.getChannelData(i));
+  // Simple MP3 encoder (using lamejs library loaded from CDN)
+  const encodeToMp3 = (samples, sampleRate) => {
+    // Load lamejs from CDN if not already loaded
+    if (!window.lamejs) {
+      throw new Error('MP3 encoder not loaded');
     }
     
-    const interleaved = interleave(data);
-    const dataLength = interleaved.length * bytesPerSample;
-    const headerLength = 44;
-    const totalLength = headerLength + dataLength;
+    const mp3encoder = new window.lamejs.Mp3Encoder(1, sampleRate, 128);
+    const mp3Data = [];
     
-    const arrayBuffer = new ArrayBuffer(totalLength);
-    const view = new DataView(arrayBuffer);
-    
-    // WAV header
-    writeString(view, 0, 'RIFF');
-    view.setUint32(4, totalLength - 8, true);
-    writeString(view, 8, 'WAVE');
-    writeString(view, 12, 'fmt ');
-    view.setUint32(16, 16, true); // fmt chunk size
-    view.setUint16(20, format, true);
-    view.setUint16(22, numberOfChannels, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * blockAlign, true);
-    view.setUint16(32, blockAlign, true);
-    view.setUint16(34, bitDepth, true);
-    writeString(view, 36, 'data');
-    view.setUint32(40, dataLength, true);
-    
-    // Write audio data
-    let offset = 44;
-    for (let i = 0; i < interleaved.length; i++) {
-      const sample = Math.max(-1, Math.min(1, interleaved[i]));
-      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
-      offset += 2;
-    }
-    
-    return new Blob([arrayBuffer], { type: 'audio/wav' });
-  };
-
-  const interleave = (channelData) => {
-    const length = channelData[0].length;
-    const numberOfChannels = channelData.length;
-    const result = new Float32Array(length * numberOfChannels);
-    
-    for (let i = 0; i < length; i++) {
-      for (let channel = 0; channel < numberOfChannels; channel++) {
-        result[i * numberOfChannels + channel] = channelData[channel][i];
+    const sampleBlockSize = 1152;
+    for (let i = 0; i < samples.length; i += sampleBlockSize) {
+      const sampleChunk = samples.subarray(i, i + sampleBlockSize);
+      const mp3buf = mp3encoder.encodeBuffer(sampleChunk);
+      if (mp3buf.length > 0) {
+        mp3Data.push(mp3buf);
       }
     }
     
-    return result;
+    const mp3buf = mp3encoder.flush();
+    if (mp3buf.length > 0) {
+      mp3Data.push(mp3buf);
+    }
+    
+    return mp3Data;
   };
 
-  const writeString = (view, offset, string) => {
-    for (let i = 0; i < string.length; i++) {
-      view.setUint8(offset + i, string.charCodeAt(i));
+  // Load lamejs library
+  React.useEffect(() => {
+    if (!window.lamejs) {
+      const script = document.createElement('script');
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.0/lame.min.js';
+      script.async = true;
+      script.onload = () => console.log('MP3 encoder loaded');
+      script.onerror = () => console.warn('MP3 encoder failed to load');
+      document.head.appendChild(script);
     }
-  };
+  }, []);
+
+  // Load lamejs library
+  React.useEffect(() => {
+    if (!window.lamejs) {
+      const script = document.createElement('script');
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.0/lame.min.js';
+      script.async = true;
+      script.onload = () => console.log('MP3 encoder loaded');
+      script.onerror = () => console.warn('MP3 encoder failed to load');
+      document.head.appendChild(script);
+    }
+  }, []);
 
   const processWithGroqAI = async (transcript) => {
     setShowAIAnimation(true);
