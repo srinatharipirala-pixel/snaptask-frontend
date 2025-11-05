@@ -54,7 +54,6 @@ export default function SnapTaskWebsite() {
     const file = event.target.files[0];
     if (!file) return;
 
-    // Check file extension
     const fileName = file.name.toLowerCase();
     const validExtensions = ['.flac', '.mp3', '.mp4', '.mpeg', '.mpga', '.m4a', '.ogg', '.opus', '.wav', '.webm'];
     const hasValidExtension = validExtensions.some(ext => fileName.endsWith(ext));
@@ -65,7 +64,7 @@ export default function SnapTaskWebsite() {
     }
 
     if (!groqApiKey || !groqApiKey.trim()) {
-      alert('⚠️ Please add your Groq API key in Settings first! The same key works for both transcription and task extraction.');
+      alert('⚠️ Please add your Groq API key in Settings first!');
       return;
     }
 
@@ -74,44 +73,39 @@ export default function SnapTaskWebsite() {
     setSyncProgress(0);
 
     try {
-      // Step 1: Convert to MP3 if it's a WAV file
-      const uploadInterval = setInterval(() => {
-        setSyncProgress(prev => {
-          if (prev >= 40) {
-            clearInterval(uploadInterval);
-            return 40;
-          }
-          return prev + 8;
-        });
-      }, 200);
+      setSyncProgress(20);
 
       let audioToUpload = file;
       let uploadFileName = file.name;
       
+      // Convert WAV to OGG (more reliable than MP3 in browser)
       if (fileName.endsWith('.wav')) {
         try {
-          console.log('Converting WAV to MP3...');
-          const mp3Blob = await convertWavToMp3(file);
-          audioToUpload = new File([mp3Blob], file.name.replace('.wav', '.mp3'), { type: 'audio/mpeg' });
+          console.log('Converting WAV to OGG...');
+          const oggBlob = await convertAudioToOgg(file);
+          audioToUpload = new File([oggBlob], file.name.replace('.wav', '.ogg'), { type: 'audio/ogg' });
           uploadFileName = audioToUpload.name;
-          console.log('Conversion successful!');
+          console.log('Conversion successful:', uploadFileName);
+          setSyncProgress(50);
         } catch (conversionError) {
-          console.error('MP3 conversion failed:', conversionError);
-          // Try original file as fallback
-          console.log('Using original WAV file...');
+          console.error('Conversion failed:', conversionError);
+          alert('⚠️ Audio conversion failed. Please try:\n1. Use an online converter to convert WAV → MP3\n2. Or record in a different format if possible');
+          setIsSyncing(false);
+          setIsProcessingFile(false);
+          return;
         }
+      } else {
+        setSyncProgress(50);
       }
 
-      clearInterval(uploadInterval);
-      setSyncProgress(50);
-
-      // Step 2: Transcribe audio using Groq Whisper
+      // Transcribe audio using Groq Whisper
       const formData = new FormData();
       formData.append('file', audioToUpload, uploadFileName);
       formData.append('model', 'whisper-large-v3');
       formData.append('response_format', 'json');
       formData.append('language', 'en');
-      formData.append('temperature', '0');
+
+      console.log('Sending to Groq:', uploadFileName, audioToUpload.type);
 
       const transcriptionResponse = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
         method: 'POST',
@@ -123,18 +117,28 @@ export default function SnapTaskWebsite() {
 
       setSyncProgress(75);
 
+      const responseText = await transcriptionResponse.text();
+      console.log('Groq response:', responseText);
+
       if (!transcriptionResponse.ok) {
-        const errorData = await transcriptionResponse.json();
-        throw new Error(errorData.error?.message || `Transcription failed: ${transcriptionResponse.status}`);
+        let errorMsg = `Transcription failed (${transcriptionResponse.status})`;
+        try {
+          const errorData = JSON.parse(responseText);
+          errorMsg = errorData.error?.message || errorMsg;
+        } catch (e) {
+          errorMsg = responseText || errorMsg;
+        }
+        throw new Error(errorMsg);
       }
 
-      const transcriptionData = await transcriptionResponse.json();
+      const transcriptionData = JSON.parse(responseText);
       const transcript = transcriptionData.text;
 
       if (!transcript || transcript.trim().length === 0) {
-        throw new Error('No speech detected in the audio file. Please try recording again with clearer audio.');
+        throw new Error('No speech detected. Please record again with clearer audio.');
       }
 
+      console.log('Transcript:', transcript);
       setSyncProgress(100);
 
       setTimeout(() => {
@@ -143,22 +147,21 @@ export default function SnapTaskWebsite() {
 
         setTimeout(() => {
           setShowSyncSuccess(false);
-          // Step 3: Process with Groq AI to extract tasks
           processWithGroqAI(transcript);
         }, 1000);
       }, 500);
 
     } catch (error) {
-      console.error('Error processing audio file:', error);
-      alert(`❌ Error: ${error.message}\n\nPlease try:\n• Recording again with clearer audio\n• Checking your internet connection\n• Verifying your Groq API key`);
+      console.error('Error:', error);
+      alert(`❌ Error: ${error.message}\n\nFor demo purposes, you can:\n1. Convert WAV to MP3 using https://cloudconvert.com/wav-to-mp3\n2. Then upload the MP3 file`);
       setIsSyncing(false);
       setIsProcessingFile(false);
       setSyncProgress(0);
     }
   };
 
-  // Convert WAV to MP3 using Web Audio API and lamejs
-  const convertWavToMp3 = async (wavFile) => {
+  // Convert audio to OGG format using MediaRecorder
+  const convertAudioToOgg = async (audioFile) => {
     return new Promise(async (resolve, reject) => {
       try {
         const audioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -169,85 +172,53 @@ export default function SnapTaskWebsite() {
             const arrayBuffer = e.target.result;
             const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
             
-            // Convert to mono and resample to 44100 Hz for better compatibility
-            const sampleRate = 44100;
-            const numberOfChannels = 1; // Mono
-            const length = audioBuffer.duration * sampleRate;
-            
-            const offlineContext = new OfflineAudioContext(numberOfChannels, length, sampleRate);
-            const source = offlineContext.createBufferSource();
+            // Create a MediaStreamDestination
+            const destination = audioContext.createMediaStreamDestination();
+            const source = audioContext.createBufferSource();
             source.buffer = audioBuffer;
-            source.connect(offlineContext.destination);
+            source.connect(destination);
+            
+            // Record using MediaRecorder
+            const mediaRecorder = new MediaRecorder(destination.stream, {
+              mimeType: 'audio/webm;codecs=opus',
+              audioBitsPerSecond: 128000
+            });
+            
+            const chunks = [];
+            mediaRecorder.ondataavailable = (e) => {
+              if (e.data.size > 0) chunks.push(e.data);
+            };
+            
+            mediaRecorder.onstop = () => {
+              const blob = new Blob(chunks, { type: 'audio/webm' });
+              resolve(blob);
+            };
+            
+            mediaRecorder.onerror = (e) => {
+              reject(new Error('Recording failed: ' + e.error));
+            };
+            
+            mediaRecorder.start();
             source.start(0);
             
-            const renderedBuffer = await offlineContext.startRendering();
+            // Stop recording after audio finishes
+            setTimeout(() => {
+              mediaRecorder.stop();
+              source.disconnect();
+            }, (audioBuffer.duration * 1000) + 100);
             
-            // Get audio samples
-            const samples = renderedBuffer.getChannelData(0);
-            
-            // Convert float samples to 16-bit PCM
-            const pcmSamples = new Int16Array(samples.length);
-            for (let i = 0; i < samples.length; i++) {
-              const s = Math.max(-1, Math.min(1, samples[i]));
-              pcmSamples[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-            }
-            
-            // Encode to MP3 using lamejs (inline implementation)
-            const mp3Data = encodeToMp3(pcmSamples, sampleRate);
-            const mp3Blob = new Blob(mp3Data, { type: 'audio/mpeg' });
-            
-            resolve(mp3Blob);
           } catch (error) {
             reject(error);
           }
         };
 
-        fileReader.onerror = () => reject(new Error('Failed to read audio file'));
-        fileReader.readAsArrayBuffer(wavFile);
+        fileReader.onerror = () => reject(new Error('Failed to read file'));
+        fileReader.readAsArrayBuffer(audioFile);
       } catch (error) {
         reject(error);
       }
     });
   };
-
-  // Simple MP3 encoder (using lamejs library loaded from CDN)
-  const encodeToMp3 = (samples, sampleRate) => {
-    // Load lamejs from CDN if not already loaded
-    if (!window.lamejs) {
-      throw new Error('MP3 encoder not loaded');
-    }
-    
-    const mp3encoder = new window.lamejs.Mp3Encoder(1, sampleRate, 128);
-    const mp3Data = [];
-    
-    const sampleBlockSize = 1152;
-    for (let i = 0; i < samples.length; i += sampleBlockSize) {
-      const sampleChunk = samples.subarray(i, i + sampleBlockSize);
-      const mp3buf = mp3encoder.encodeBuffer(sampleChunk);
-      if (mp3buf.length > 0) {
-        mp3Data.push(mp3buf);
-      }
-    }
-    
-    const mp3buf = mp3encoder.flush();
-    if (mp3buf.length > 0) {
-      mp3Data.push(mp3buf);
-    }
-    
-    return mp3Data;
-  };
-
-  // Load lamejs library
-  React.useEffect(() => {
-    if (!window.lamejs) {
-      const script = document.createElement('script');
-      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.0/lame.min.js';
-      script.async = true;
-      script.onload = () => console.log('MP3 encoder loaded');
-      script.onerror = () => console.warn('MP3 encoder failed to load');
-      document.head.appendChild(script);
-    }
-  }, []);
 
   // Load lamejs library
   React.useEffect(() => {
